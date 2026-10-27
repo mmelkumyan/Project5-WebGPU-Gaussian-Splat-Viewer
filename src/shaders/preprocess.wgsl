@@ -57,9 +57,16 @@ struct Gaussian {
 
 struct Splat {
     //TODO: store information for 2D splat rendering
+    pos: vec2<f32>, // NDC center
 };
 
 //TODO: bind your data here
+@group(0) @binding(0)
+var<uniform> camera: CameraUniforms;
+@group(1) @binding(0)
+var<storage, read> gaussians: array<Gaussian>;
+@group(1) @binding(1)
+var<storage, read_write> splats: array<Splat>;
 @group(2) @binding(0)
 var<storage, read_write> sort_infos: SortInfos;
 @group(2) @binding(1)
@@ -113,6 +120,33 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let idx = gid.x;
     //TODO: set up pipeline as described in instruction
 
+    if (idx >= arrayLength(&gaussians)) {
+        return;
+    }
+
     let keys_per_dispatch = workgroupSize * sortKeyPerThread; 
+
+    let vertex = gaussians[idx];
+    let a = unpack2x16float(vertex.pos_opacity[0]);
+    let b = unpack2x16float(vertex.pos_opacity[1]);
+    let pos = vec4<f32>(a.x, a.y, b.x, 1.); // World space pos
+
+    // ndc <- clip <- view <- world space 
+    let clipPos: vec4<f32> =  camera.proj * camera.view * pos;
+    if (clipPos.w <= 0.f) {
+        return;
+    }
+    let ndcPos: vec4<f32> = clipPos / clipPos.w;
+
+    // Frustum culling
+    if (abs(ndcPos.x) > 1.2f || abs(ndcPos.y) > 1.f || 
+        ndcPos.z > 1.2f || ndcPos.z < 0.f) {
+        return;
+    }
+
+    // Record 2D splats
+    splats[idx].pos = ndcPos.xy;
+
+    
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys
 }

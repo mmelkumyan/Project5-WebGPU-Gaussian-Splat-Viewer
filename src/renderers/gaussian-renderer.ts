@@ -36,6 +36,22 @@ export default function get_renderer(
 
   const nulling_data = new Uint32Array([0]);
 
+  const splat_buffer = createBuffer(
+    device, 
+    "splats", 
+    pc.num_points * 2 * 4, // N * size(vec2<f32>)
+    GPUBufferUsage.STORAGE,
+  );
+
+  const draw_buffer = createBuffer(
+    device, 
+    "indirect draw", 
+    4 * 4, 
+    GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+  );
+  device.queue.writeBuffer(draw_buffer, 0, 
+    new Uint32Array([6, pc.num_points, 0, 0]));
+
   // ===============================================
   //    Create Compute Pipeline and Bind Groups
   // ===============================================
@@ -52,8 +68,23 @@ export default function get_renderer(
     },
   });
 
+  const camera_bind_group = device.createBindGroup({
+    label: 'preprocess camera',
+    layout: preprocess_pipeline.getBindGroupLayout(0),
+    entries: [{binding: 0, resource: { buffer: camera_buffer }}],
+  });
+
+  const gaussian_bind_group = device.createBindGroup({
+    label: 'preprocess gaussian',
+    layout: preprocess_pipeline.getBindGroupLayout(1),
+    entries: [
+      {binding: 0, resource: { buffer: pc.gaussian_3d_buffer }},
+      {binding: 1, resource: { buffer: splat_buffer}}
+    ],
+  });
+
   const sort_bind_group = device.createBindGroup({
-    label: 'sort',
+    label: 'preprocess sort',
     layout: preprocess_pipeline.getBindGroupLayout(2),
     entries: [
       { binding: 0, resource: { buffer: sorter.sort_info_buffer } },
@@ -67,11 +98,64 @@ export default function get_renderer(
   // ===============================================
   //    Create Render Pipeline and Bind Groups
   // ===============================================
-  
+  const render_shader = device.createShaderModule({code: renderWGSL});
+  const render_pipeline = device.createRenderPipeline({
+    label: 'render',
+    layout: 'auto',
+    vertex: {
+      module: render_shader,
+      entryPoint: 'vs_main',
+    },
+    fragment: {
+      module: render_shader,
+      entryPoint: 'fs_main',
+      targets: [{ format: presentation_format }],
+    },
+    primitive: {
+      topology: 'triangle-list',
+    },
+  });
+
+  const splat_bind_group = device.createBindGroup({
+    label: 'render splats',
+    layout: render_pipeline.getBindGroupLayout(0),
+    entries: [
+      {binding: 0, resource: { buffer: splat_buffer}}
+    ],
+  });
 
   // ===============================================
   //    Command Encoder Functions
   // ===============================================
+
+  function record_preprocess(encoder: GPUCommandEncoder) {
+    const pass = encoder.beginComputePass({
+      label: 'preprocess pass',
+    });
+    pass.setPipeline(preprocess_pipeline);
+    pass.setBindGroup(0, camera_bind_group);
+    pass.setBindGroup(1, gaussian_bind_group);
+    pass.dispatchWorkgroups(Math.ceil(pc.num_points / C.histogram_wg_size));
+    pass.end();
+  }
+
+  const record_render = (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
+    const pass = encoder.beginRenderPass({
+      label: 'render pass',
+      colorAttachments: [
+        {
+          view: texture_view,
+          loadOp: 'clear',
+          storeOp: 'store',
+        }
+      ],
+    });
+    pass.setPipeline(render_pipeline);
+    pass.setBindGroup(0, splat_bind_group);
+    pass.drawIndirect(draw_buffer, 0);
+    pass.end();
+  };
+  
   
 
   // ===============================================
@@ -79,7 +163,9 @@ export default function get_renderer(
   // ===============================================
   return {
     frame: (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
+      record_preprocess(encoder);
       sorter.sort(encoder);
+      record_render(encoder, texture_view);
     },
     camera_buffer,
   };
