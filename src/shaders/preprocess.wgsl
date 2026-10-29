@@ -58,11 +58,14 @@ struct Gaussian {
 struct Splat {
     //TODO: store information for 2D splat rendering
     pos: vec2<f32>, // NDC center
+    size: vec2<f32>, // NDC half width
 };
 
 //TODO: bind your data here
 @group(0) @binding(0)
 var<uniform> camera: CameraUniforms;
+@group(0) @binding(1)
+var<uniform> render_settings: RenderSettings;
 @group(1) @binding(0)
 var<storage, read> gaussians: array<Gaussian>;
 @group(1) @binding(1)
@@ -115,6 +118,76 @@ fn computeColorFromSH(dir: vec3<f32>, v_idx: u32, sh_deg: u32) -> vec3<f32> {
     return  max(vec3<f32>(0.), result);
 }
 
+fn diag(s: vec3<f32>) -> mat3x3<f32> {
+    return mat3x3<f32>(
+        s.x, 0.f, 0.f,
+        0.f, s.y, 0.f,
+        0.f, 0.f, s.z,
+    );
+}
+
+// Quaternion -> rotation matrix
+fn quatToRot(q: vec4<f32>) -> mat3x3<f32> {
+    let x = q.x;
+    let y = q.y;
+    let z = q.z;
+    let w = q.w;
+    return transpose(mat3x3<f32>(
+        1.f - 2.f * (y*y + z*z),       2.f * (x*y - w*z),        2.f * (x*z + w*y),
+              2.f * (x*y + w*z), 1.f - 2.f * (x*x + z*z),        2.f * (y*z - w*x),
+              2.f * (x*z - w*y),       2.f * (y*z + w*x),  1.f - 2.f * (x*x + y*y),
+    ));
+}
+
+// Get world space 3D covariance
+fn computeCov3D(scale: vec3<f32>, R: mat3x3<f32>) -> mat3x3<f32> {
+    let S = diag(render_settings.gaussian_scaling * scale);
+    let M = R * S;
+    return M * transpose(M);
+}
+
+// Get jacobia of perspective proj of point t
+fn computeJacobian(t: vec3<f32>) -> mat3x3<f32> {
+    let fx = camera.focal.x;
+    let fy = camera.focal.y;
+    return transpose(mat3x3<f32>(
+        fx/t.z, 0,      -fx*t.x / (t.z*t.z),
+        0,      fy/t.z, -fy*t.y / (t.z*t.z),
+        0,      0,       0,
+    ));
+}
+
+// Get screenspace 2D covariance
+fn computeCov2D(q: vec4<f32>, scale: vec3<f32>, t: vec3<f32>) -> mat3x3<f32> {
+    // Quaternion -> rotatoin matrix
+    let R = quatToRot(q);
+
+    // Calculate covariance 3d
+    let cov3d = computeCov3D(scale, R);
+
+    // Calculate jacobian
+    let J = computeJacobian(t);
+
+    // Calculate covariance 2d
+    let W = mat3x3<f32>(camera.view[0].xyz, camera.view[1].xyz, camera.view[2].xyz);
+    let T = J * W;
+    return T * cov3d * transpose(T);
+}
+
+// Get screen radius in pixels from cov2d eigne values
+fn computeRadius(cov2d: mat3x3<f32>) -> f32 {
+    let a = cov2d[0][0];
+    let b = cov2d[0][1];
+    let c = cov2d[1][1];
+
+    let det = a*c - b*b;
+    let mid = (a+c) / 2;
+    let d1 = mid + sqrt(max(0.1, mid*mid - det));
+    let d2 = mid - sqrt(max(0.1, mid*mid - det));
+
+    return ceil(3 * sqrt(max(d1, d2)));
+}
+
 @compute @workgroup_size(workgroupSize,1,1)
 fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) wgs: vec3<u32>) {
     let idx = gid.x;
@@ -127,26 +200,51 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let keys_per_dispatch = workgroupSize * sortKeyPerThread; 
 
     let vertex = gaussians[idx];
-    let a = unpack2x16float(vertex.pos_opacity[0]);
-    let b = unpack2x16float(vertex.pos_opacity[1]);
-    let pos = vec4<f32>(a.x, a.y, b.x, 1.); // World space pos
+    let pos_xy = unpack2x16float(vertex.pos_opacity[0]);
+    let pos_z_opacity = unpack2x16float(vertex.pos_opacity[1]);
+    let pos = vec4<f32>(pos_xy.x, pos_xy.y, pos_z_opacity.x, 1.); // World space pos
 
     // ndc <- clip <- view <- world space 
-    let clipPos: vec4<f32> =  camera.proj * camera.view * pos;
+    let viewPos: vec4<f32> = camera.view * pos;
+    let clipPos: vec4<f32> =  camera.proj * viewPos;
     if (clipPos.w <= 0.f) {
         return;
     }
     let ndcPos: vec4<f32> = clipPos / clipPos.w;
 
     // Frustum culling
-    if (abs(ndcPos.x) > 1.2f || abs(ndcPos.y) > 1.f || 
-        ndcPos.z > 1.2f || ndcPos.z < 0.f) {
+    if (abs(ndcPos.x) > 1.2f || abs(ndcPos.y) > 1.2f || 
+        ndcPos.z > 1.f || ndcPos.z < 0.f) {
         return;
     }
 
-    // Record 2D splats
-    splats[idx].pos = ndcPos.xy;
+    // Unwrap rotation/ scale
+    let rot01 = unpack2x16float(vertex.rot[0]);
+    let rot23 = unpack2x16float(vertex.rot[1]);
+    let scale01 = unpack2x16float(vertex.scale[0]);
+    let scale2N = unpack2x16float(vertex.scale[1]);
 
+    let q = normalize(vec4<f32>(rot01.y, rot23.xy, rot01.x)); // x y z w
+    let scale = exp(vec3<f32>(scale01.xy, scale2N.x));
+
+    // Project to screen space covariance
+    let cov2d = computeCov2D(q, scale, viewPos.xyz);
+
+    let radius = computeRadius(cov2d); // in pixels
+    let size = radius * 2 / camera.viewport;
+
+    // Save depth/ sort index
+    let slot = atomicAdd(&sort_infos.keys_size, 1u);
+    sort_indices[slot] = idx;
+    sort_depths[slot] = ~bitcast<u32>(viewPos.z); // float->int, order preserving, then reverse order
+
+    // Save 2D splats
+    splats[idx].pos = ndcPos.xy;
+    splats[idx].size = size;
     
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys
+    if (slot % keys_per_dispatch == 0u) {
+        atomicAdd(&sort_dispatch.dispatch_x, 1u);
+    }
+
 }

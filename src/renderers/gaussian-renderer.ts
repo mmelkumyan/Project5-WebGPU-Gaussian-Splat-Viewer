@@ -5,7 +5,7 @@ import { get_sorter,c_histogram_block_rows,C } from '../sort/sort';
 import { Renderer } from './renderer';
 
 export interface GaussianRenderer extends Renderer {
-
+  set_gaussian_scaling: (scaling: number) => void,
 }
 
 // Utility to create GPU buffers
@@ -39,7 +39,7 @@ export default function get_renderer(
   const splat_buffer = createBuffer(
     device, 
     "splats", 
-    pc.num_points * 2 * 4, // N * size(vec2<f32>)
+    pc.num_points * 2 * (4 + 4), // N * size(vec2<f32>)
     GPUBufferUsage.STORAGE,
   );
 
@@ -51,6 +51,15 @@ export default function get_renderer(
   );
   device.queue.writeBuffer(draw_buffer, 0, 
     new Uint32Array([6, pc.num_points, 0, 0]));
+
+  const render_settings_buffer = createBuffer(
+    device,
+    'render settings',
+    2 * 4, // 2 floats
+    GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    new Float32Array([1.0, pc.sh_deg]),
+  );
+
 
   // ===============================================
   //    Create Compute Pipeline and Bind Groups
@@ -71,7 +80,10 @@ export default function get_renderer(
   const camera_bind_group = device.createBindGroup({
     label: 'preprocess camera',
     layout: preprocess_pipeline.getBindGroupLayout(0),
-    entries: [{binding: 0, resource: { buffer: camera_buffer }}],
+    entries: [
+      {binding: 0, resource: { buffer: camera_buffer }},
+      {binding: 1, resource: { buffer: render_settings_buffer }}
+    ],
   });
 
   const gaussian_bind_group = device.createBindGroup({
@@ -120,7 +132,8 @@ export default function get_renderer(
     label: 'render splats',
     layout: render_pipeline.getBindGroupLayout(0),
     entries: [
-      {binding: 0, resource: { buffer: splat_buffer}}
+      {binding: 0, resource: { buffer: splat_buffer}},
+      {binding: 1, resource: { buffer: sorter.ping_pong[0].sort_indices_buffer}},
     ],
   });
 
@@ -135,6 +148,7 @@ export default function get_renderer(
     pass.setPipeline(preprocess_pipeline);
     pass.setBindGroup(0, camera_bind_group);
     pass.setBindGroup(1, gaussian_bind_group);
+    pass.setBindGroup(2, sort_bind_group);
     pass.dispatchWorkgroups(Math.ceil(pc.num_points / C.histogram_wg_size));
     pass.end();
   }
@@ -163,10 +177,28 @@ export default function get_renderer(
   // ===============================================
   return {
     frame: (encoder: GPUCommandEncoder, texture_view: GPUTextureView) => {
+      // Reset sorting buffers!
+      device.queue.writeBuffer(sorter.sort_info_buffer, 0, nulling_data);
+      device.queue.writeBuffer(sorter.sort_dispatch_indirect_buffer, 0, nulling_data);
+
+      // Preprocess pass
       record_preprocess(encoder);
+      
+      // Sort splat by depth
       sorter.sort(encoder);
+      
+      // Save sorted info
+      encoder.copyBufferToBuffer(
+        sorter.sort_info_buffer, 0,
+        draw_buffer, 4, 4
+      );
+      
+      // Render splats
       record_render(encoder, texture_view);
     },
     camera_buffer,
+    set_gaussian_scaling: (scaling: number) => {
+      device.queue.writeBuffer(render_settings_buffer, 0, new Float32Array([scaling]));
+    }
   };
 }

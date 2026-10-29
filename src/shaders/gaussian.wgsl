@@ -17,6 +17,7 @@
 struct Splat {
     //TODO: information defined in preprocess compute shader
     pos: vec2<f32>, // NDC center
+    size: vec2<f32>, // NDC half width
 };
 
 struct VertexOutput {
@@ -24,12 +25,10 @@ struct VertexOutput {
     //TODO: information passed from vertex shader to fragment shader
 };
 
-// @group(0) @binding(0)
-// var<uniform> camera: CameraUniforms;
-// @group(1) @binding(0)
-// var<storage, read> gaussians: array<Gaussian>;
 @group(0) @binding(0)
 var<storage, read> splats: array<Splat>;
+@group(0) @binding(1)
+var<storage, read> sort_indices : array<u32>;
 
 @vertex
 fn vs_main(@builtin(instance_index) idx: u32, @builtin(vertex_index) vid: u32
@@ -43,13 +42,14 @@ fn vs_main(@builtin(instance_index) idx: u32, @builtin(vertex_index) vid: u32
         vec2(-1.f,  1.f),
         vec2(-1.f, -1.f),
     );
-    const HALF_SIZE = 0.01f;
+
+    let splat = splats[sort_indices[idx]];
 
     let ndcVertPos = QUAD_VERTS[vid];
-    let ndcCenter = splats[idx].pos;
+    let ndcCenter = splat.pos;
 
     var out: VertexOutput;
-    var ndcXY = ndcCenter + ndcVertPos * HALF_SIZE;
+    var ndcXY = ndcCenter + ndcVertPos * splat.size;
     out.position = vec4(ndcXY, 0.f, 1.f);
     return out;
 }
