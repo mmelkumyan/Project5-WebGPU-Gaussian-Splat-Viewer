@@ -59,6 +59,7 @@ struct Splat {
     //TODO: store information for 2D splat rendering
     pos: vec2<f32>, // NDC center
     size: vec2<f32>, // NDC half width
+    color: vec4<f32>,
 };
 
 //TODO: bind your data here
@@ -237,11 +238,14 @@ fn preprocess(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgr
     let slot = atomicAdd(&sort_infos.keys_size, 1u);
     sort_indices[slot] = idx;
     sort_depths[slot] = ~bitcast<u32>(viewPos.z); // float->int, order preserving, then reverse order
+    // sort_depths[slot] = idx;   // temporary: unique, trivially deterministic
+
 
     // Save 2D splats
     splats[idx].pos = ndcPos.xy;
     splats[idx].size = size;
-    
+    splats[idx].color = vec4(size.xy, 0.f, 1.f);
+
     // increment DispatchIndirect.dispatchx each time you reach limit for one dispatch of keys
     if (slot % keys_per_dispatch == 0u) {
         atomicAdd(&sort_dispatch.dispatch_x, 1u);

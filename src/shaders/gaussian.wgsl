@@ -18,11 +18,13 @@ struct Splat {
     //TODO: information defined in preprocess compute shader
     pos: vec2<f32>, // NDC center
     size: vec2<f32>, // NDC half width
+    color: vec4<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     //TODO: information passed from vertex shader to fragment shader
+    @location(0) color: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -51,10 +53,12 @@ fn vs_main(@builtin(instance_index) idx: u32, @builtin(vertex_index) vid: u32
     var out: VertexOutput;
     var ndcXY = ndcCenter + ndcVertPos * splat.size;
     out.position = vec4(ndcXY, 0.f, 1.f);
+    out.color = splat.color;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.);
+    // return vec4<f32>(1.);
+    return in.color;
 }

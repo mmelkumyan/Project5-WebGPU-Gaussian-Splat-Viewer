@@ -39,7 +39,7 @@ export default function get_renderer(
   const splat_buffer = createBuffer(
     device, 
     "splats", 
-    pc.num_points * 2 * (4 + 4), // N * size(vec2<f32>)
+    pc.num_points * 8 * 4, // N * size(vec2<f32>)
     GPUBufferUsage.STORAGE,
   );
 
